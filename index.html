@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LowPoly 3D 闯关 · Three.js</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #101b2e; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; user-select: none; }
+  canvas { display: block; touch-action: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+
+  #hud {
+    position: fixed; top: 14px; left: 14px; z-index: 10;
+    background: rgba(10, 20, 38, 0.72);
+    border: 1px solid rgba(120, 180, 255, 0.35);
+    border-radius: 10px; padding: 10px 16px;
+    color: #e8f1ff; font-size: 15px; line-height: 1.7;
+    backdrop-filter: blur(4px);
+  }
+  #hud b { color: #6ec1ff; }
+
+  #toast {
+    position: fixed; top: 16%; left: 50%; transform: translateX(-50%);
+    z-index: 10; color: #fff; font-size: 20px; font-weight: 600;
+    background: rgba(10, 20, 38, 0.78);
+    padding: 10px 26px; border-radius: 999px;
+    border: 1px solid rgba(120, 180, 255, 0.35);
+    opacity: 0; transition: opacity .25s;
+    pointer-events: none; white-space: nowrap;
+  }
+  #toast.show { opacity: 1; }
+  #toast.danger { border-color: #ff6b78; color: #ffd7da; }
+
+  #hint {
+    position: fixed; left: 14px; bottom: 12px; z-index: 10;
+    color: rgba(232, 241, 255, 0.75); font-size: 13px; line-height: 1.6;
+    background: rgba(10, 20, 38, 0.55); padding: 8px 12px; border-radius: 8px;
+  }
+  #hint kbd {
+    background: rgba(255,255,255,.14); border-radius: 4px;
+    padding: 1px 6px; font-family: inherit;
+  }
+
+  #win {
+    position: fixed; inset: 0; z-index: 20;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(8, 15, 30, 0.72); backdrop-filter: blur(5px);
+  }
+  #win.show { display: flex; }
+  #win .panel {
+    text-align: center; color: #eaf3ff;
+    background: rgba(22, 40, 70, 0.95);
+    border: 1px solid rgba(120, 180, 255, 0.45);
+    border-radius: 16px; padding: 42px 58px;
+  }
+  #win h1 { font-size: 34px; margin-bottom: 10px; color: #7fd0ff; }
+  #win p { color: rgba(234, 243, 255, .8); margin-bottom: 26px; }
+  #win button {
+    font-size: 17px; padding: 11px 34px; border: none; border-radius: 999px;
+    background: #2f7fff; color: #fff; cursor: pointer; font-weight: 600;
+  }
+  #win button:hover { background: #4a92ff; }
+</style>
+</head>
+<body>
+  <div id="hud">
+    <div>关卡：<b id="hud-level">1 / 3</b></div>
+    <div>收集：<b id="hud-pickup">0 / 0</b></div>
+  </div>
+  <div id="toast"></div>
+  <div id="hint">
+    <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动　<kbd>空格</kbd> 跳跃　<kbd>R</kbd> 重置当前关卡<br/>
+    鼠标按住拖拽旋转视角，滚轮缩放
+  </div>
+  <div id="win">
+    <div class="panel">
+      <h1>🎉 通关成功！</h1>
+      <p>你完成了全部 3 个关卡。</p>
+      <button id="restart-btn">重新开始</button>
+    </div>
+  </div>
+
+  <!-- Three.js r160 UMD（单文件免构建；如需离线可把该 JS 下载到本地并改为相对路径） -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
+  <script>
+  (function () {
+    "use strict";
+
+    // ============ 常量 ============
+    const GRAVITY = 26;
+    const JUMP_V = 10.5;
+    const MOVE_SPEED = 6.2;
+    const PLAYER_HALF = new THREE.Vector3(0.35, 0.6, 0.35); // 玩家碰撞盒半尺寸（高 1.2）
+    const FALL_Y = -8;
+
+    const COLORS = {
+      bg: 0x101b2e,
+      platform: 0x5f8f86,    // 静态平台：灰绿
+      moving: 0xc49a6c,      // 移动平台：土黄
+      ghost: 0x7fd8ff,       // 隐形/消失平台：淡青
+      player: 0x2f7fff,      // 玩家：蓝
+      danger: 0xe63946,      // 危险区：红
+      obstacle: 0xf77f00,    // 旋转障碍：橙
+      pickup: 0xffd23f,      // 拾取物：金
+      portal: 0x38bdf8,      // 传送门：蓝
+      portalOff: 0x7c8896,   // 未激活传送门：灰
+      wind: 0x67e8f9         // 风场：青
+    };
+
+    // ============ 渲染器 / 场景 / 相机 ============
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(COLORS.bg);
+    scene.fog = new THREE.Fog(COLORS.bg, 42, 95);
+
+    const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 200);
+
+    const hemi = new THREE.HemisphereLight(0xbfe3ff, 0x2a3648, 1.05);
+    scene.add(hemi);
+    const sun = new THREE.DirectionalLight(0xffffff, 1.15);
+    sun.position.set(12, 22, 10);
+    scene.add(sun);
+
+    // ============ 输入 ============
+    const keys = {};
+    const KEYMAP = {
+      KeyW: "f", KeyS: "b", KeyA: "l", KeyD: "r", Space: "jump", KeyR: "reset"
+    };
+    window.addEventListener("keydown", (e) => {
+      const k = KEYMAP[e.code];
+      if (k) { e.preventDefault(); keys[k] = true; }
+    });
+    window.addEventListener("keyup", (e) => {
+      const k = KEYMAP[e.code];
+      if (k) keys[k] = false;
+    });
+
+    // 鼠标拖拽转视角
+    let camYaw = 0, camPitch = 0.42, camDist = 7.5;
+    let dragging = false, lastX = 0, lastY = 0;
+    const canvas = renderer.domElement;
+    canvas.addEventListener("pointerdown", (e) => {
+      dragging = true; lastX = e.clientX; lastY = e.clientY;
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener("pointerup", (e) => { dragging = false; try { canvas.releasePointerCapture(e.pointerId); } catch (_) {} });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      camYaw -= dx * 0.005;
+      camPitch = Math.min(1.25, Math.max(0.12, camPitch + dy * 0.005));
+    });
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      camDist = Math.min(11, Math.max(4, camDist + e.deltaY * 0.01));
+    }, { passive: false });
+
+    // ============ 玩家 ============
+    const playerMesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.35, 0.5, 4, 12),
+      new THREE.MeshStandardMaterial({ color: COLORS.player, roughness: 0.45, flatShading: true })
+    );
+    // 朝向小鼻子
+    const nose = new THREE.Mesh(
+      new THREE.BoxGeometry(0.16, 0.16, 0.14),
+      new THREE.MeshStandardMaterial({ color: 0xdceaff, flatShading: true })
+    );
+    nose.position.set(0, 0.15, -0.34);
+    playerMesh.add(nose);
+    scene.add(playerMesh);
+
+    const player = {
+      pos: new THREE.Vector3(),
+      vel: new THREE.Vector3(),
+      windVel: new THREE.Vector3(),
+      grounded: false,
+      coyote: 0,
+      groundPlat: null,
+      facing: 0
+    };
+
+    // ============ 通用构建工具 ============
+    function mat(color, opts) {
+      return new THREE.MeshStandardMaterial(Object.assign({
+        color, roughness: 0.8, metalness: 0.05, flatShading: true
+      }, opts || {}));
+    }
+
+    function makeBoxMesh(size, material) {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(size.x, size.y, size.z), material);
+      return m;
+    }
+
+    // 平台：{ mesh, pos, half, solid, delta, update }
+    function addPlatform(group, x, y, z, sx, sy, sz, color) {
+      const half = new THREE.Vector3(sx / 2, sy / 2, sz / 2);
+      const mesh = makeBoxMesh(new THREE.Vector3(sx, sy, sz), mat(color));
+      mesh.position.set(x, y, z);
+      group.add(mesh);
+      const p = {
+        mesh, pos: new THREE.Vector3(x, y, z), half,
+        solid: true, delta: new THREE.Vector3(), update: null, isGhost: false
+      };
+      return p;
+    }
+
+    function addMovingPlatform(group, def) {
+      // def: {x,y,z,sx,sy,sz, axis:'x'|'z', amp, speed, phase}
+      const p = addPlatform(group, def.x, def.y, def.z, def.sx, def.sy, def.sz, COLORS.moving);
+      const base = p.pos.clone();
+      p.update = function (t) {
+        const old = p.pos.clone();
+        const off = Math.sin(t * def.speed + (def.phase || 0)) * def.amp;
+        p.pos.copy(base);
+        p.pos[def.axis] = base[def.axis] + off;
+        p.delta.subVectors(p.pos, old);
+        p.mesh.position.copy(p.pos);
+      };
+      return p;
+    }
+
+    // 周期性消失的“隐形平台”
+    function addGhostPlatform(group, x, y, z, sx, sy, sz, phaseOffset) {
+      const material = mat(COLORS.ghost, { transparent: true, opacity: 0.85 });
+      const half = new THREE.Vector3(sx / 2, sy / 2, sz / 2);
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), material);
+      mesh.position.set(x, y, z);
+      group.add(mesh);
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(sx, sy, sz)),
+        new THREE.LineBasicMaterial({ color: 0xd6f4ff, transparent: true, opacity: 0.55 })
+      );
+      edges.position.copy(mesh.position);
+      group.add(edges);
+
+      const PERIOD = 3.8, SOLID_TIME = 2.4, WARN_TIME = 0.6;
+      const p = {
+        mesh, edges, pos: new THREE.Vector3(x, y, z), half,
+        solid: true, delta: new THREE.Vector3(), isGhost: true,
+        update: function (t) {
+          const ph = (t + phaseOffset) % PERIOD;
+          if (ph < SOLID_TIME) {
+            p.solid = true;
+            const warning = ph > SOLID_TIME - WARN_TIME;
+            material.opacity = warning ? (Math.sin(t * 28) > 0 ? 0.85 : 0.35) : 0.85;
+            edges.material.opacity = warning ? 0.9 : 0.55;
+          } else {
+            p.solid = false; // 消失期间无碰撞
+            material.opacity = 0.1;
+            edges.material.opacity = 0.16;
+          }
+        }
+      };
+      return p;
+    }
+
+    // 红色危险区（静态盒）
+    function addHazard(group, x, topY, z, sx, sy, sz) {
+      const center = new THREE.Vector3(x, topY + sy / 2, z);
+      const half = new THREE.Vector3(sx / 2, sy / 2, sz / 2);
+      const mesh = makeBoxMesh(new THREE.Vector3(sx, sy, sz),
+        mat(COLORS.danger, { emissive: 0x661018, emissiveIntensity: 0.7 }));
+      mesh.position.copy(center);
+      group.add(mesh);
+      return { pos: center, half, mesh };
+    }
+
+    // 旋转橙色障碍（绕 Y 轴扫动的横杆）
+    function addSpinner(group, x, topY, z, len, speed) {
+      const g = new THREE.Group();
+      g.position.set(x, topY + 0.38, z);
+      const bar = new THREE.Mesh(
+        new THREE.BoxGeometry(len, 0.3, 0.3),
+        mat(COLORS.obstacle, { emissive: 0x5c2e00, emissiveIntensity: 0.5 })
+      );
+      bar.position.x = len / 2; // 绕一端旋转，横扫半径 len
+      g.add(bar);
+      const hub = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.26, 0.42, 8),
+        mat(0xd96600, { emissive: 0x4d2500, emissiveIntensity: 0.5 })
+      );
+      g.add(hub);
+      group.add(g);
+      return { group: g, speed, box3: new THREE.Box3() };
+    }
+
+    // 金色拾取物
+    function addPickup(group, x, y, z) {
+      const mesh = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.34, 0),
+        mat(COLORS.pickup, { emissive: 0x7a5b00, emissiveIntensity: 0.55, roughness: 0.35 })
+      );
+      mesh.position.set(x, y, z);
+      group.add(mesh);
+      return { mesh, baseY: y, got: false, pos: new THREE.Vector3(x, y, z) };
+    }
+
+    // 风场推力区域
+    function addWind(group, x, y, z, sx, sy, sz, fx, fz) {
+      const mesh = makeBoxMesh(new THREE.Vector3(sx, sy, sz),
+        mat(COLORS.wind, { transparent: true, opacity: 0.16, depthWrite: false }));
+      mesh.position.set(x, y, z);
+      group.add(mesh);
+      // 方向箭头
+      const arrow = new THREE.Mesh(
+        new THREE.ConeGeometry(0.35, 0.9, 6),
+        mat(COLORS.wind, { transparent: true, opacity: 0.6, flatShading: true })
+      );
+      const ang = Math.atan2(fx, fz);
+      arrow.rotation.x = Math.PI / 2; // 锥尖朝 -Z，再绕 Y 对齐
+      arrow.rotation.y = ang;
+      arrow.position.set(x, y + sy / 2 - 0.5, z);
+      group.add(arrow);
+      return {
+        pos: new THREE.Vector3(x, y, z),
+        half: new THREE.Vector3(sx / 2, sy / 2, sz / 2),
+        force: new THREE.Vector3(fx, 0, fz),
+        mesh, arrow
+      };
+    }
+
+    // 传送门
+    function addPortal(group, x, topY, z) {
+      const g = new THREE.Group();
+      g.position.set(x, topY + 1.05, z);
+      const ringMat = mat(COLORS.portalOff, { emissive: 0x22303c, emissiveIntensity: 0.6, roughness: 0.4 });
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.82, 0.12, 10, 24), ringMat);
+      g.add(ring);
+      const discMat = new THREE.MeshBasicMaterial({
+        color: COLORS.portalOff, transparent: true, opacity: 0.18, side: THREE.DoubleSide
+      });
+      const disc = new THREE.Mesh(new THREE.CircleGeometry(0.72, 24), discMat);
+      g.add(disc);
+      group.add(g);
+      return {
+        group: g, ring, disc, ringMat, discMat,
+        pos: new THREE.Vector3(x, topY + 1.05, z),
+        half: new THREE.Vector3(0.95, 1.15, 0.95),
+        active: false, need: 0, got: 0
+      };
+    }
+
+    // ============ 关卡定义 ============
+    function buildLevel1(group) {
+      const L = { group, t: 0, platforms: [], hazards: [], obstacles: [], pickups: [], wind: [], portal: null };
+      const top = 0.5; // 普通平台顶面高度
+
+      L.platforms.push(addPlatform(group, 0, 0, 7, 6, 1, 6, COLORS.platform));       // 起点
+      L.platforms.push(addPlatform(group, 0, 0, 1, 4, 1, 4, COLORS.platform));       // 静态
+      L.platforms.push(addMovingPlatform(group, {                                    // 移动平台
+        x: 0, y: 0, z: -5.5, sx: 3, sy: 0.6, sz: 3, axis: "z", amp: 2, speed: 1.1
+      }));
+      L.platforms.push(addPlatform(group, 0, 0, -11, 5, 1, 5, COLORS.platform));     // 危险区平台
+      L.platforms.push(addPlatform(group, 0, 0, -18, 4, 1, 4, COLORS.platform));
+      L.platforms.push(addPlatform(group, 0, 0, -24.5, 5, 1, 5, COLORS.platform));   // 传送门平台
+
+      L.hazards.push(addHazard(group, 0, top, -11, 2, 0.35, 2));                     // 红色危险区（从两侧绕开）
+
+      // 关卡 1 无收集要求，传送门默认激活
+      L.portal = addPortal(group, 0, top, -24.5);
+      L.portal.need = 0;
+      L.portal.active = true;
+      setPortalVisual(L.portal, true);
+
+      L.spawn = new THREE.Vector3(0, top + 0.62, 7.5);
+      L.tip = "第 1 关（教学）：跳过平台，躲开红色危险区，进入蓝色传送门";
+      return L;
+    }
+
+    function buildLevel2(group) {
+      const L = { group, t: 0, platforms: [], hazards: [], obstacles: [], pickups: [], wind: [], portal: null };
+      const top = 0.5;
+
+      L.platforms.push(addPlatform(group, 0, 0, 8, 6, 1, 6, COLORS.platform));       // 起点
+      L.platforms.push(addPlatform(group, 0, 0, 0.5, 7, 1, 7, COLORS.platform));     // 中央平台
+
+      // 左支路（静态）
+      L.platforms.push(addPlatform(group, -6.5, 0, 0.5, 3, 1, 3, COLORS.platform));
+      // 右支路（移动平台 + 远端平台）
+      L.platforms.push(addMovingPlatform(group, {
+        x: 3.75, y: 0, z: 0.5, sx: 3, sy: 0.6, sz: 3, axis: "x", amp: 1.25, speed: 1.0
+      }));
+      L.platforms.push(addPlatform(group, 8, 0, 0.5, 3, 1, 3, COLORS.platform));
+      // 前支路
+      L.platforms.push(addPlatform(group, 0, 0, -6, 3, 1, 3, COLORS.platform));
+      // 传送门平台
+      L.platforms.push(addPlatform(group, 0, 0, -12, 5, 1, 5, COLORS.platform));
+
+      // 三条支路上各一个旋转障碍 + 一个拾取物
+      L.obstacles.push(addSpinner(group, -6.5, top, 0.5, 2.3, 1.7));
+      L.pickups.push(addPickup(group, -6.5, top + 1.0, 0.5));
+
+      L.obstacles.push(addSpinner(group, 8, top, 0.5, 2.3, -2.0));
+      L.pickups.push(addPickup(group, 8, top + 1.0, 0.5));
+
+      L.obstacles.push(addSpinner(group, 0, top, -6, 2.3, 2.3));
+      L.pickups.push(addPickup(group, 0, top + 1.0, -6));
+
+      L.portal = addPortal(group, 0, top, -12);
+      L.portal.need = 3;
+
+      L.spawn = new THREE.Vector3(0, top + 0.62, 8.5);
+      L.tip = "第 2 关（收集）：收集 3 个金色拾取物，激活传送门";
+      return L;
+    }
+
+    function buildLevel3(group) {
+      const L = { group, t: 0, platforms: [], hazards: [], obstacles: [], pickups: [], wind: [], portal: null };
+      const top = 0.5, ghostTop = 0.25;
+
+      L.platforms.push(addPlatform(group, 0, 0, 9, 5, 1, 5, COLORS.platform));       // 起点
+      L.platforms.push(addPlatform(group, 0, 0, 3.5, 3, 1, 6, COLORS.platform));     // 风之桥
+      L.platforms.push(addPlatform(group, 0, 0, -2.5, 4, 1, 4, COLORS.platform));    // 拾取 1
+
+      // 周期性消失的隐形平台（相位错开）
+      L.platforms.push(addGhostPlatform(group, 0, 0, -7.5, 2.2, 0.5, 2.2, 0));
+      L.platforms.push(addGhostPlatform(group, 0, 0, -11.5, 2.2, 0.5, 2.2, 1.25));
+      L.platforms.push(addGhostPlatform(group, 0, 0, -15.5, 2.2, 0.5, 2.2, 2.5));
+
+      // 旋转障碍大阵（顶面延伸到 z=-17，保证与最后一个隐形平台的间隙可跳过）
+      L.platforms.push(addPlatform(group, 0, 0, -20, 7, 1, 6, COLORS.platform));
+      L.obstacles.push(addSpinner(group, -2.2, top, -18.4, 1.7, 1.8));
+      L.obstacles.push(addSpinner(group, 0, top, -20.2, 2.1, -2.2));
+      L.obstacles.push(addSpinner(group, 2.2, top, -22, 1.7, 2.6));
+      L.hazards.push(addHazard(group, 2.8, top, -17.6, 1.3, 0.35, 1.3));             // 红色危险角
+      L.pickups.push(addPickup(group, -2.8, top + 1.0, -18.2));                      // 拾取 2
+      L.pickups.push(addPickup(group, 2.8, top + 1.0, -22.2));                       // 拾取 3
+
+      // 风场中的移动平台
+      L.platforms.push(addMovingPlatform(group, {
+        x: 0, y: 0, z: -26.65, sx: 3, sy: 0.6, sz: 3, axis: "z", amp: 1.85, speed: 0.95
+      }));
+      L.platforms.push(addPlatform(group, 0, 0, -34, 5, 1, 5, COLORS.platform));     // 终点平台
+
+      // 风场：桥上向右推、跨越间隙时向右推
+      L.wind.push(addWind(group, 0, 1.6, 3.5, 3.4, 2.4, 6.4, 10, 0));
+      L.wind.push(addWind(group, 0, 1.6, -27.5, 5, 2.4, 7, 11, 0));
+
+      L.pickups.push(addPickup(group, 0, top + 1.0, -2.5));                          // 拾取 1
+      L.pickups.push(addPickup(group, 0, top + 1.0, -33.5));                         // 拾取 4
+
+      L.portal = addPortal(group, 0, top, -35.3);
+      L.portal.need = 4;
+
+      L.spawn = new THREE.Vector3(0, top + 0.62, 9.5);
+      L.tip = "第 3 关（挑战）：隐形平台会消失，小心风场与旋转障碍，收集 4 个拾取物";
+      return L;
+    }
+
+    const BUILDERS = [buildLevel1, buildLevel2, buildLevel3];
+
+    // ============ 关卡状态 ============
+    let levelIndex = 0;
+    let level = null;
+    let gameState = "play"; // play | won
+    let portalHintCd = 0;
+
+    const hudLevel = document.getElementById("hud-level");
+    const hudPickup = document.getElementById("hud-pickup");
+    const toastEl = document.getElementById("toast");
+    const winEl = document.getElementById("win");
+    let toastTimer = null;
+
+    function toast(text, danger, duration) {
+      toastEl.textContent = text;
+      toastEl.classList.toggle("danger", !!danger);
+      toastEl.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove("show"), duration || 2200);
+    }
+
+    function setPortalVisual(portal, active) {
+      portal.ringMat.color.setHex(active ? COLORS.portal : COLORS.portalOff);
+      portal.ringMat.emissive.setHex(active ? 0x1b5f8a : 0x22303c);
+      portal.discMat.color.setHex(active ? COLORS.portal : COLORS.portalOff);
+      portal.discMat.opacity = active ? 0.42 : 0.18;
+    }
+
+    function updateHud() {
+      hudLevel.textContent = (levelIndex + 1) + " / 3";
+      const need = level.portal.need;
+      hudPickup.textContent = need === 0 ? "—" : (level.portal.got + " / " + need);
+    }
+
+    function loadLevel(idx) {
+      if (level && level.group) scene.remove(level.group);
+      const group = new THREE.Group();
+      scene.add(group);
+      level = BUILDERS[idx](group);
+      // 移动/隐形平台需要加入统一更新列表
+      level.dynamic = level.platforms.filter(p => p.update);
+
+      player.pos.copy(level.spawn);
+      player.vel.set(0, 0, 0);
+      player.windVel.set(0, 0, 0);
+      player.grounded = false;
+      player.coyote = 0;
+      player.groundPlat = null;
+      playerMesh.visible = true;
+      playerMesh.position.copy(player.pos);
+
+      camYaw = 0; camPitch = 0.42; camDist = 7.5;
+      for (const k in keys) keys[k] = false;
+      portalHintCd = 0;
+      gameState = "play";
+      updateHud();
+      toast(level.tip, false, 3200);
+    }
+
+    function die() {
+      toast("触发危险 / 掉落，当前关卡重置！", true, 1600);
+      loadLevel(levelIndex);
+    }
+
+    // ============ 碰撞工具 ============
+    const _box = new THREE.Box3();
+    const _pBox = new THREE.Box3();
+    const _min = new THREE.Vector3(), _max = new THREE.Vector3();
+
+    function playerBox() {
+      _pBox.min.set(player.pos.x - PLAYER_HALF.x, player.pos.y - PLAYER_HALF.y, player.pos.z - PLAYER_HALF.z);
+      _pBox.max.set(player.pos.x + PLAYER_HALF.x, player.pos.y + PLAYER_HALF.y, player.pos.z + PLAYER_HALF.z);
+      return _pBox;
+    }
+
+    function platBox(p, out) {
+      out.min.set(p.pos.x - p.half.x, p.pos.y - p.half.y, p.pos.z - p.half.z);
+      out.max.set(p.pos.x + p.half.x, p.pos.y + p.half.y, p.pos.z + p.half.z);
+      return out;
+    }
+
+    function overlapBox(pos, half) {
+      return Math.abs(player.pos.x - pos.x) < half.x + PLAYER_HALF.x &&
+             Math.abs(player.pos.y - pos.y) < half.y + PLAYER_HALF.y &&
+             Math.abs(player.pos.z - pos.z) < half.z + PLAYER_HALF.z;
+    }
+
+    // 单轴移动 + AABB 推回
+    function moveAxis(axis, delta) {
+      if (delta === 0) return;
+      player.pos[axis] += delta;
+      const pb = playerBox();
+      for (const p of level.platforms) {
+        if (!p.solid) continue;
+        platBox(p, _box);
+        if (pb.intersectsBox(_box)) {
+          if (delta > 0) {
+            player.pos[axis] = _box.min[axis] - PLAYER_HALF[axis];
+            if (axis === "y") player.vel.y = 0;
+            else player.vel[axis] = 0;
+          } else if (delta < 0) {
+            player.pos[axis] = _box.max[axis] + PLAYER_HALF[axis];
+            if (axis === "y") {
+              player.vel.y = 0;
+              player.grounded = true;
+              player.groundPlat = p;
+            } else {
+              player.vel[axis] = 0;
+            }
+          }
+          pb.min.set(player.pos.x - PLAYER_HALF.x, player.pos.y - PLAYER_HALF.y, player.pos.z - PLAYER_HALF.z);
+          pb.max.set(player.pos.x + PLAYER_HALF.x, player.pos.y + PLAYER_HALF.y, player.pos.z + PLAYER_HALF.z);
+        }
+      }
+    }
+
+    // ============ 每帧更新 ============
+    const clock = new THREE.Clock();
+    const _fwd = new THREE.Vector3(), _right = new THREE.Vector3(), _move = new THREE.Vector3();
+
+    function updatePlatforms(dt) {
+      level.t += dt;
+      for (const p of level.dynamic) {
+        p.delta.set(0, 0, 0);
+        p.update(level.t);
+      }
+    }
+
+    function updatePlayer(dt) {
+      // 移动平台带动
+      if (player.groundPlat && player.groundPlat.solid) {
+        player.pos.add(player.groundPlat.delta);
+      }
+      const wasGrounded = player.grounded;
+      player.grounded = false;
+      player.groundPlat = null;
+      player.coyote = wasGrounded ? 0.1 : Math.max(0, player.coyote - dt);
+
+      // 相机相对的移动方向
+      _fwd.set(-Math.sin(camYaw), 0, -Math.cos(camYaw));
+      _right.set(Math.cos(camYaw), 0, -Math.sin(camYaw));
+      _move.set(0, 0, 0);
+      if (keys.f) _move.add(_fwd);
+      if (keys.b) _move.sub(_fwd);
+      if (keys.r) _move.add(_right);
+      if (keys.l) _move.sub(_right);
+
+      if (_move.lengthSq() > 0) {
+        _move.normalize();
+        player.vel.x = _move.x * MOVE_SPEED;
+        player.vel.z = _move.z * MOVE_SPEED;
+        player.facing = Math.atan2(-_move.x, -_move.z);
+      } else {
+        // 无输入时主动移动速度快速归零
+        const damp = Math.max(0, 1 - 14 * dt);
+        player.vel.x *= damp;
+        player.vel.z *= damp;
+      }
+
+      // 风场：独立累积一个漂移速度（衰减较慢，避免被普通阻尼抵消）
+      let inWind = false;
+      for (const w of level.wind) {
+        if (overlapBox(w.pos, w.half)) {
+          inWind = true;
+          player.windVel.x += w.force.x * dt;
+          player.windVel.z += w.force.z * dt;
+        }
+      }
+      const windDamp = Math.max(0, 1 - (inWind ? 0.8 : 2.2) * dt);
+      player.windVel.x *= windDamp;
+      player.windVel.z *= windDamp;
+      const windCap = 4.5;
+      const wl = Math.hypot(player.windVel.x, player.windVel.z);
+      if (wl > windCap) {
+        player.windVel.multiplyScalar(windCap / wl);
+      }
+
+      // 跳跃
+      if (keys.jump && (player.grounded || player.coyote > 0)) {
+        player.vel.y = JUMP_V;
+        player.grounded = false;
+        player.coyote = 0;
+        keys.jump = false; // 防连跳
+      }
+
+      // 重力
+      player.vel.y -= GRAVITY * dt;
+      if (player.grounded === false && player.vel.y < 0 && wasGrounded) {
+        // 贴地保持，避免平台上抖动
+      }
+
+      // 分轴移动与碰撞（主动速度 + 风场漂移）
+      moveAxis("x", (player.vel.x + player.windVel.x) * dt);
+      moveAxis("z", (player.vel.z + player.windVel.z) * dt);
+      moveAxis("y", player.vel.y * dt);
+
+      // 朝向平滑过渡
+      let diff = player.facing - playerMesh.rotation.y;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      playerMesh.rotation.y += diff * Math.min(1, 14 * dt);
+      playerMesh.position.copy(player.pos);
+
+      // 掉落
+      if (player.pos.y < FALL_Y) { die(); return; }
+    }
+
+    function updateHazards() {
+      // 静态红色危险区
+      for (const h of level.hazards) {
+        if (overlapBox(h.pos, h.half)) { die(); return; }
+      }
+      // 旋转障碍：用世界 AABB 判定，任意朝向都稳定
+      for (const o of level.obstacles) {
+        o.group.updateWorldMatrix(true, false);
+        o.box3.setFromObject(o.group);
+        if (o.box3.intersectsBox(playerBox())) { die(); return; }
+      }
+    }
+
+    function updatePickups(dt) {
+      for (const it of level.pickups) {
+        if (it.got) continue;
+        it.mesh.rotation.y += dt * 2.4;
+        it.mesh.position.y = it.baseY + Math.sin(level.t * 3 + it.baseY) * 0.12;
+        if (player.pos.distanceTo(it.pos) < 1.0) {
+          it.got = true;
+          it.mesh.visible = false;
+          level.portal.got++;
+          toast("拾取！ " + level.portal.got + " / " + level.portal.need);
+          if (level.portal.got >= level.portal.need && !level.portal.active) {
+            level.portal.active = true;
+            setPortalVisual(level.portal, true);
+            setTimeout(() => toast("传送门已激活，前往蓝色光门！", false, 2200), 700);
+          }
+          updateHud();
+        }
+      }
+    }
+
+    function updatePortal(dt) {
+      const p = level.portal;
+      p.group.rotation.z += dt * 0.8;
+      const pulse = 1 + Math.sin(level.t * 4) * 0.04;
+      p.group.scale.setScalar(p.active ? pulse : 1);
+
+      if (overlapBox(p.pos, p.half)) {
+        if (p.active) {
+          if (levelIndex < BUILDERS.length - 1) {
+            levelIndex++;
+            toast("进入第 " + (levelIndex + 1) + " 关 …", false, 1800);
+            loadLevel(levelIndex);
+          } else {
+            gameState = "won";
+            winEl.classList.add("show");
+          }
+        } else if (portalHintCd <= 0) {
+          toast("传送门未激活，还需 " + (p.need - p.got) + " 个拾取物", true, 1600);
+          portalHintCd = 1.5;
+        }
+      }
+      if (portalHintCd > 0) portalHintCd -= dt;
+    }
+
+    function updateCamera(dt) {
+      const target = new THREE.Vector3(player.pos.x, player.pos.y + 0.85, player.pos.z);
+      const cp = Math.cos(camPitch);
+      const offset = new THREE.Vector3(
+        Math.sin(camYaw) * cp,
+        Math.sin(camPitch),
+        Math.cos(camYaw) * cp
+      ).multiplyScalar(camDist);
+      const desired = target.clone().add(offset);
+      camera.position.lerp(desired, Math.min(1, 12 * dt));
+      camera.lookAt(target);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = Math.min(clock.getDelta(), 0.05);
+
+      if (gameState === "play") {
+        if (keys.reset) { keys.reset = false; die(); }
+        updatePlatforms(dt);
+        updatePlayer(dt);
+        if (gameState !== "play") { renderer.render(scene, camera); return; }
+        updateHazards();
+        if (gameState !== "play") { renderer.render(scene, camera); return; }
+        updatePickups(dt);
+        updatePortal(dt);
+      }
+      updateCamera(dt);
+      renderer.render(scene, camera);
+    }
+
+    // ============ 重启 / 缩放 ============
+    document.getElementById("restart-btn").addEventListener("click", () => {
+      winEl.classList.remove("show");
+      levelIndex = 0;
+      loadLevel(0);
+    });
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // 启动
+    loadLevel(0);
+    updateCamera(1);
+    animate();
+  })();
+  </script>
+</body>
+</html>
